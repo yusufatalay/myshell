@@ -82,197 +82,193 @@ void setup(char inputBuffer[], char *args[],int *background)
 		printf("args %d = %s\n",i,args[i]);
 } /* end of setup routine */
 
-volatile sig_atomic_t tstop_flag = 1;
 
-// the handler function for the sigaction
-// this handler will be used by the child
-void tstopHandler(int signal_number){
+
+// when a foreground child receives SIGTSTP it will set this flag value to 0 
+volatile sig_atomic_t tstop_flag = 1;
+// ^Z signal handler for the foreground child
+void fgTSTOPHandler(int signal_number){
   tstop_flag = 0;
 }
-// Pressing ^Z should not effect the main proccesses
-// it should only stop the forehround child processes
-void maintstopHandler(int signal_number){
-write(STDOUT_FILENO,"\n",1);
+
+
+// Some processes should ignore the SIGTSTP (main and the background processes)
+// in my case it only prints new-line (like linux's original terminal)
+void ignoreTSTOPHandler(int signal_number){
+//  write(STDOUT_FILENO,"\n",1);
 }
 
-void check_bg_process(int* wstatus, int procNo, char* arg,int* backgroundProcessCounter){
-while(1){
-  if(waitpid(-1,wstatus,WNOHANG) == procNo){
-    // if the bg child has terminated normally or just simply returned
-    // to imitate the terminal emulator I will print a similar
-    // message to notify the user.
-    fprintf(stderr,"[%d] + %d done %s\n",*backgroundProcessCounter,procNo,arg);
-    //decrement the counter since the child is done 
-    backgroundProcessCounter--;                                   
-    break;
-  }
-}
-}
 
 int main(void)
 {
-  char inputBuffer[MAX_LINE]; /*buffer to hold command entered */
-  int background; /* equals 1 if a command is followed by '&' */
-  char *args[MAX_LINE/2 + 1]; /*command line arguments */
-  char* path = getenv ("PATH");
-  char *paths[50]; 
-  int pathAmount= 0;
-  // to imitate the terminal emulator we need to count how many bg proccesses
-  // are present, this value will be incremented by one after each execution
-  // which its args contains ampersand, and will be decremented 
-  // when bg process finishes.
-  int backgroundProccessCounter = 0; 
-  paths[pathAmount] = strtok(path, ":");
-  // loop through the string to extract all other tokens
-  while(paths[pathAmount] != NULL) {
-      pathAmount++;
-      paths[pathAmount]  = strtok(NULL, ":");
-      }
-  // TODO: Create a string array (binPath)  with size pathAmount DONE
-  char **binPath;
-  binPath= malloc(pathAmount * sizeof(char*));
-  for (int i = 0; i < pathAmount; i++){
-      binPath[i] = malloc((MAX_LINE/2 + 1) * sizeof(char));
-      }
-  // parent should be irresponsive to the ^Z signal, only child should response to that signal if the child is a foreground process
- // struct sigaction child_sigterm_action;
- // memset(&child_sigterm_action, 0, sizeof(child_sigterm_action));
+      char inputBuffer[MAX_LINE]; /*buffer to hold command entered */
+      int background; /* equals 1 if a command is followed by '&' */
+      char *args[MAX_LINE/2 + 1]; /*command line arguments */
+      char *path= getenv("PATH"); // get the PATH variable 
+      char *paths[50];            // paths will hold all the PATH entries 
+      int pathAmount=0;           // amount of path entries
 
- // child_sigterm_action.sa_handler = &maintstopHandler;
- //   child_sigterm_action.sa_flags= 0;
- // 
- //   // register the signal handler and send SIGTSTP when encountering with 
- //   if((sigemptyset(&child_sigterm_action.sa_mask) == -1)||
- //       (sigaction(SIGTSTP,&child_sigterm_action,NULL) == -1)){
- //         perror(NULL);
- //         exit(EXIT_FAILURE);
- //       }        
-  signal(SIGTSTP,maintstopHandler);
+      // start tokenising the PATH variable with the delimiter of ':'
+      paths[pathAmount] = strtok(path,":");
+      while(paths[pathAmount] != NULL){
+        pathAmount++;
+        paths[pathAmount] = strtok(NULL,":");
+      }
+      // binPath will hold all the PATH entries on the heap
+      // so we can do some string operations on it.
+      char **binPath;
+      binPath = malloc(pathAmount * sizeof(char*));
+      for(int i = 0 ; i< pathAmount ; i++){
+        // ... * sizeof(char) is literally equals to multiplying with 1, but for clean code reasons i will do it like this
+        binPath[i] = malloc((MAX_LINE/2 + 1) * sizeof(char));
+      }
+      
+      signal(SIGTSTP, ignoreTSTOPHandler);
 
-    while (1){
+      while (1){
         background = 0;
-        
+        tstop_flag = 1;
         printf("myshell: ");
         fflush(stdout);
         /*setup() calls exit() when Control-D is entered */
+
         setup(inputBuffer, args, &background);
-       
-        // if backgruond is 1 then increment the backgroundProcessCounter
-        if(background){
-            backgroundProccessCounter++;
-            // also remove ampersand(&) from the args list 
-            // it causes errors because it literally gives it as a parameter
-            // to the program that we want to execute
-            for(int i =0; i<(sizeof(args)/sizeof(args[0]));i++){
-                if(strcmp(args[i],"&")== 0) {
-                    args[i]= NULL;
-                    break;
-                }
-            }
+      
+        // check if input is empty, (e.g user is pressing 'return' without entering a command)
+        if(args[0] == NULL){
+          continue;
         }
-        // TODO: binPath[i] = paths[i] + '/'+ args[0] DONE
-        for(int i = 0; i< pathAmount; i++){
-            // I will build the string on this variable and assign it to a corresponding place at binPath
-            char *elemHolder;
-            elemHolder = malloc((MAX_LINE/2 +1)*sizeof(char*));
-            snprintf(elemHolder,(MAX_LINE/2)+1,"%s/%s",paths[i],args[0]);
-            strcpy(binPath[i],elemHolder);
-            free(elemHolder);
+        if(background){
+          // also remove ampersand(&) from the args list 
+          // it causes errors because it literally gives it as a parameter
+          // to the program that we want to execute
+          for(int i =0; i<(sizeof(args)/sizeof(args[0]));i++){
+              if(strcmp(args[i],"&")== 0) {
+                  args[i]= NULL;
+                  break;
+              }
+          }
+ 
+        }
+        // before creating any process, check wether if the first argument is exit or not
+        // if so, then check if there are any running process 
+        // (there is no need for explicitly checking for background process 
+        // since user cannot enter any command if there is a foreground process is running)
+        // if there is then alert the user, otherwise terminate the ingoing shell
+        if(strcmp(args[0],"exit")==0){
+          if(waitpid(-1,NULL,WNOHANG) == 0){
+            fprintf(stderr, "There are process(es) running at background, cannot exit\n");
+          }else{
+            kill(0,SIGKILL);
+          }
+        }else if(strcmp(args[0],"alias")==0){
+          
         }
         
-        pid_t parentPID = getpid();
-        // create a fork()
-        pid_t proc = 0;
-        int wstatus;    // wait status of the child proccess
-        proc = fork();
-        // error check
-        if(proc == -1){
-            // use stderr
-            perror("Error happened while forking operation\n");
+        // Some string operations here, since execv's first parameter requires the binary name appended to the path 
+        for(int i = 0; i<pathAmount;i++){
+          char *elemHolder;
+          elemHolder = malloc((MAX_LINE/2 +1)*sizeof(char*));
+          // create just enough space for the each path + arg
+          snprintf(elemHolder,(MAX_LINE/2) +1,"%s/%s",paths[i],args[0]);
+          strcpy(binPath[i],elemHolder);
+          free(elemHolder);
         }
-        if (proc  == 0 ){
-            // run child
 
-            // handle the SIGTSTP signal in child 
-            // only stop the foreground processes
-            struct sigaction sigtstop_action;
-            memset(&sigtstop_action,0,sizeof(sigtstop_action));
-            sigtstop_action.sa_handler = &tstopHandler;
-            // register the signal handler also set the mask 
-            // if they fail they will set the global errno 
-            // I will use perror(NULL) to show corresponding message
-            if((sigemptyset(&sigtstop_action.sa_mask) == -1) ||
-                (sigaction(SIGTSTP,&sigtstop_action,NULL) == -1)){
-              // give system error message
-                perror(NULL);
-                // exit out of the system
-                exit(EXIT_FAILURE);
-            }
-            
-            // if args[0] is 'exit' then terminate the whole process
-            if(strcmp(args[0],"exit") == 0){
-              kill(proc,SIGTERM);
-            }
-            // while there is no stop signal, run the child
-            if(background == 0){
-              while(tstop_flag){
-               // for every entry in the binPath array 
-               // try to run the execv command with given args
-               // if the code ever exits out of the loop 
-               // then the given argument cannot be found in the PATH
-                for(int i =0 ;i < pathAmount; i++){
-                  execv(binPath[i],args);
-                }
+        // get parent's pid for comparing purposes
+        pid_t parentPID = getpid();
 
+        // create a child
+        pid_t childPID =0;
+        int wstatus;   // wait status of the child process
+        childPID = fork();
+        // check for forking error
+        if(childPID == -1){
+          // since fork() sets global errno I will use perror() to get system defined error message on the stderr
+          perror("Error while forking");
+        }
+        if(childPID == 0){
+          // we are in the child process
+
+          // handle signals only when bacground == 0
+          // handle the SIGTSTP signal in child 
+          // only stop the foreground processes
+          struct sigaction sigtstop_action;
+          memset(&sigtstop_action,0,sizeof(sigtstop_action));
+          sigtstop_action.sa_handler = &fgTSTOPHandler;
+          // register the signal handler also set the mask 
+          // if they fail they will set the global errno 
+          // I will use perror(NULL) to show corresponding message
+          if((sigemptyset(&sigtstop_action.sa_mask) == -1) ||
+              (sigaction(SIGTSTP,&sigtstop_action,NULL) == -1)){
+            // give system error message
+              perror(NULL);
+              // exit out of the system
+              exit(EXIT_FAILURE);
+          }
+
+
+          if(background == 0){
+            while(tstop_flag){
+              for(int i =0 ; i<pathAmount; i++){
+                execv(binPath[i],args);
               }
-                perror("Command cannot be found in the PATH");
-            }else{
-              for(int i =0 ;i < pathAmount; i++){
-                  execv(binPath[i],args);
-              }
-               perror("Command cannot be found in the PATH");
+              // if the command has not found in the PATH, or if there is some other error happened then print to stderr
+              perror("Error while executing"); 
+              break;
             }
-            fprintf(stderr,"Proccess %d has stopped\n",(int)proc);
+          }else{
+              for(int i =0 ; i<pathAmount; i++){
+                execv(binPath[i],args);
+              }
+              // if the command has not found in the PATH, or if there is some other error happened then print to stderr
+              perror("Error while executing"); 
+          }
+          
         }
         if(getpid() == parentPID){
-            // parent here 
-              // if background has not set then wait for the child 
-            if(background == 0){
-             
-     
-              int waitedproc = waitpid(proc,&wstatus,0);
-                    while(waitedproc != proc);        
-                //TODO: child proccess is exited check the reason with the W functions
-                
+          // we are in the parent process
 
-            }else{
-                // parent does not waits for its child here (aka the ampersand is not in use)
-                // notify the user that the background process has created with is pid
-                fprintf(stderr,"[%d] %d\n",backgroundProccessCounter,(int)proc);
-                // check for the status of the background childs status
-                
-                // constantly check if child has exited
-                // create a new process to check if background process has finished
-                pid_t c_pid = fork();
-                if(c_pid == -1){
-                  perror(NULL);
-                }else if (c_pid == 0) {
-                  // check for the child proccess on the background 
-                  check_bg_process(&wstatus,proc,args[0],&backgroundProccessCounter);
-                }else{
-                  setup(inputBuffer, args, &background);
+          // if the process is set to run in the background
+          if(background){
+            // do not wait for the child process to finish 
+            // but for notifying purposes, make another process to wait for the child's process to finis
+            // so I can let the user know that background process has finished
+            // notify the user that the background process has created with is pid
+            fprintf(stderr,"Process %d has been backgrounded\n",(int)childPID);
+            
+            // I wish to let the user know that the child process has finished (like the linux terminal does), I've tried numereous things with new child processes but none of them has worked
+            // go to the beginning of the loop
+            continue;
+          }else{
+            // wait for the process since its running on the foreground
+            
+            // if there is no error comes from the child process check for the wstatus code
+            // Also check if the process has been stopped (WUNTRACED)
+            if(waitpid(childPID,&wstatus,WUNTRACED) != -1){
+              if(WIFEXITED(wstatus)){
+                // since waitpid does not set the global errno, I will use fpritf to write to the stderr
+                if(WEXITSTATUS(wstatus) != 0){ // successfull executions return 0, we don't need to notify the user if the process is successfull (its expected)
+                fprintf(stderr,"The process %d has returned with the exit code: %d\n",(int)childPID,WEXITSTATUS(wstatus));
                 }
+              }
+                // check if the process has terminated by a signal and notify the user.
+              else if(WIFSIGNALED(wstatus)){
+                fprintf(stderr,"The process %d has terminated by the signal: %d\n",(int)childPID,WTERMSIG(wstatus));
+              }
+                // check if the process has stopped by a signal 
+              }else if(WIFSTOPPED(wstatus)){
+                fprintf(stderr,"The process %d has stopped bt the signal: %d\n",(int)childPID,WSTOPSIG(wstatus));
+              }
             }
+        }
 
-
-            /** the steps are:
-            (1) fork a child process using fork()
-            (2) the child process will invoke execv()
-            (3) if background == 0, the parent will wait,
-            otherwise it will invoke the setup() function again. */
-         }
-    }
-    // free the binPath 
-    free(binPath);
+          /** the steps are:
+          (1) fork a child process using fork()
+          (2) the child process will invoke execv()
+          (3) if background == 0, the parent will wait,
+          otherwise it will invoke the setup() function again. */
+      }
+      // free the binPath
+      free(binPath);
 }
-
