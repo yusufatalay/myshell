@@ -98,6 +98,11 @@ void ignoreTSTOPHandler(int signal_number){
 //  write(STDOUT_FILENO,"\n",1);
 }
 
+// I consider aliases as structs 
+typedef struct alias{
+  char *original;
+  char *replacement;
+}alias;
 
 int main(void)
 {
@@ -107,6 +112,9 @@ int main(void)
       char *path= getenv("PATH"); // get the PATH variable 
       char *paths[50];            // paths will hold all the PATH entries 
       int pathAmount=0;           // amount of path entries
+      alias aliases[MAX_LINE/2+1]; // User's aliases will sored here      
+      int aliasCount = 0;          // amount of aliases user currently have  
+
 
       // start tokenising the PATH variable with the delimiter of ':'
       paths[pathAmount] = strtok(path,":");
@@ -138,8 +146,9 @@ int main(void)
         if(args[0] == NULL){
           continue;
         }
+        
         if(background){
-          // also remove ampersand(&) from the args list 
+          // remove ampersand(&) from the args list 
           // it causes errors because it literally gives it as a parameter
           // to the program that we want to execute
           for(int i =0; i<(sizeof(args)/sizeof(args[0]));i++){
@@ -162,9 +171,39 @@ int main(void)
             kill(0,SIGKILL);
           }
         }else if(strcmp(args[0],"alias")==0){
-          
+          if(strcmp(args[1],"-l")==0){
+            for(int i=0; i<aliasCount;i++){
+              fprintf(stderr,"\t%s %s\n",aliases[i].replacement,aliases[i].original);
+            }
+          }else{
+            // construct a string from args variable 
+            alias tempAlias;
+            tempAlias.original = malloc(strlen(args[1])) ;
+            tempAlias.replacement= malloc(strlen(args[2])) ;
+
+            strcpy(tempAlias.original,args[1]);
+            strcpy(tempAlias.replacement,args[2]);
+            aliases[aliasCount] = tempAlias;
+            aliasCount++;
+          }
+            continue;
+        }else if(strcmp(args[0],"unalias")==0){
+          // just decrement the aliasCount so listing will be done accordingly 
+          aliasCount--;
         }
-        
+        // Check aliases first before creating a child 
+        // run aliases with system() function, that is allowed 
+        for(int i = 0 ; i<aliasCount;i++){
+          if(strcmp(args[0],aliases[i].replacement)== 0){
+            // alias found
+            if(system(aliases[i].original)== -1){
+              perror(NULL);
+            }else{
+              // alias executed successfully
+              continue;
+            }
+          }
+        }
         // Some string operations here, since execv's first parameter requires the binary name appended to the path 
         for(int i = 0; i<pathAmount;i++){
           char *elemHolder;
@@ -173,7 +212,7 @@ int main(void)
           snprintf(elemHolder,(MAX_LINE/2) +1,"%s/%s",paths[i],args[0]);
           strcpy(binPath[i],elemHolder);
           free(elemHolder);
-        }
+          }
 
         // get parent's pid for comparing purposes
         pid_t parentPID = getpid();
