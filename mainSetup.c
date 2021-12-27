@@ -5,9 +5,23 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <errno.h>
+#include <fcntl.h>
  
 #define MAX_LINE 80 /* 80 chars per line, per command, should be enough. */
- 
+
+// this macro is for writing the output of a function to given file (create the file if not exists)
+// also file's previous content will be overrided since single direction arrow ('>') has used
+#define WRITE_FILE_FLAGS (O_WRONLY | O_CREAT)
+
+// When this macro used, the given file opened or created in append mode, meaning writintg operations will not override file's precious content
+#define APPEND_FILE_FLAGS (O_WRONLY | O_CREAT | O_APPEND) 
+
+// This macro will be used when a file is redirected to stdin, so there will be no creation or appening, only reading
+#define READ_FILE_FLAGS (O_RDWR) 
+
+// If given file does not exist then create it with this flags
+#define CREATE_MODE (S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH)
+
 /* The setup function below will not return any value, but it will just: read
 in the next command line; separate it into distinct arguments (using blanks as
 delimiters), and set the args array entries to point to the beginning of what
@@ -95,7 +109,65 @@ void fgTSTOPHandler(int signal_number){
 // Some processes should ignore the SIGTSTP (main and the background processes)
 // in my case it only prints new-line (like linux's original terminal)
 void ignoreTSTOPHandler(int signal_number){
-//  write(STDOUT_FILENO,"\n",1);
+  write(STDOUT_FILENO,"\nmyshell: ",10);
+}
+
+// location of the '>' 0 means it does not exist
+int gtloc = 0;
+// location of the '>>' 0 means it does not exist
+int rsloc = 0;
+// location of the '<' 0 means it does not exist
+int ltloc = 0;
+
+// hold the location of the first operator
+int minloc= 0;
+// locateRedirectOperators will set the variables above according to the args array
+void locateRedirectOperators(char *args[]){
+  for(int i = 0; args[i] != NULL; i++){
+    if((strcmp(args[i],">") == 0) && gtloc == 0){
+      gtloc = i;
+    }else if ((strcmp(args[i],">>") == 0) && rsloc == 0) {
+      rsloc = i;
+    }else if ((strcmp(args[i],"<") == 0) && ltloc == 0) {
+      ltloc = i; 
+    }
+  }
+}
+// gets minimum non-zero value amongst the three locator variable
+void setmin(int gtloc, int ltloc, int rsloc){
+  if(gtloc == 0 && ltloc == 0 && rsloc == 0){
+    minloc = 0;
+  }else if(gtloc == 0 && ltloc == 0){
+    minloc =rsloc;
+  }else if(gtloc == 0 && rsloc == 0){
+    minloc =ltloc;
+  }else if(rsloc == 0 && ltloc == 0){
+    minloc =gtloc;
+  }else if(rsloc == 0){
+    if(ltloc < gtloc){
+      minloc = ltloc;
+    }else{
+      minloc =gtloc;
+    }
+  }else if(ltloc == 0){
+    if(rsloc < gtloc ){
+      minloc =rsloc;
+    }else {
+      minloc =gtloc;
+    }
+  }else if(gtloc == 0){
+    if(ltloc < rsloc ){
+      minloc =ltloc;
+    }else{
+      minloc =rsloc;
+    }
+  }else if(gtloc < rsloc && gtloc < ltloc){
+    minloc =gtloc;
+  }else if(rsloc < gtloc && rsloc< ltloc){
+    minloc =rsloc;
+  }else{
+    minloc =ltloc;
+  }
 }
 int main(void)
 {
@@ -105,7 +177,6 @@ int main(void)
       char *path= getenv("PATH"); // get the PATH variable 
       char *paths[50];            // paths will hold all the PATH entries 
       int pathAmount=0;           // amount of path entries
-
       // start tokenising the PATH variable with the delimiter of ':'
       paths[pathAmount] = strtok(path,":");
       while(paths[pathAmount] != NULL){
@@ -124,6 +195,9 @@ int main(void)
       signal(SIGTSTP, ignoreTSTOPHandler);
 
       while (1){
+        ltloc = 0 ;
+        gtloc = 0 ;
+        rsloc = 0 ;
         background = 0;
         tstop_flag = 1;
         printf("myshell: ");
@@ -131,12 +205,16 @@ int main(void)
         /*setup() calls exit() when Control-D is entered */
 
         setup(inputBuffer, args, &background);
-      
+        
         // check if input is empty, (e.g user is pressing 'return' without entering a command)
         if(args[0] == NULL){
           continue;
         }
+        // just after getting the args, scan for I/O redirection operators. 
+        locateRedirectOperators(args);
+        setmin(gtloc, ltloc, rsloc);
         
+        // NOTE: Since this loop modifies the args I won't merge this one and the one above, even though its not good for optimization
         if(background){
           // remove ampersand(&) from the args list 
           // it causes errors because it literally gives it as a parameter
@@ -147,7 +225,6 @@ int main(void)
                   break;
               }
           }
- 
         }
         // before creating any process, check wether if the first argument is exit or not
         // if so, then check if there are any running process 
@@ -161,6 +238,8 @@ int main(void)
             kill(0,SIGKILL);
           }
         }
+
+
         // Some string operations here, since execv's first parameter requires the binary name appended to the path 
         for(int i = 0; i<pathAmount;i++){
           char *elemHolder;
@@ -185,8 +264,87 @@ int main(void)
         }
         if(childPID == 0){
           // we are in the child process
+          
+          // dup2 function only alters the I/O for current process, therefore it should be called in child process 
+          // Handling redirection;
+          // If '>' or '>>' occurs at position n (in args array)
+          // redirect the STDOUT to the file at args[n+1] e.g dup2(args[n+1],STDOUT_FILENO)
+          //
+          // If '<' occurs position n (in args array)
+          // redirect the args[n+1] to STDIN e.g dup2(args[n+1],STDIN_FILENO)
+          
+          // check if there is any operator to begin with 
+          if(minloc>0){
+            // findout which operator that is and then set the stdin and stdout appropriately
+            if(gtloc > 0){
+              // '>' has been detected in the args set the STDOUT to the given file
+              int fd;
+              fd = open(args[gtloc+1],WRITE_FILE_FLAGS,CREATE_MODE);    // desired file resides at the next parameter 
+              if(fd == -1){
+                // open sets the errno so just use perror() for error printing
+                perror(NULL);
+                exit(EXIT_FAILURE);
+              }
+              // redirect the stdout to the given file descriptor
+              if(dup2(fd,STDOUT_FILENO)== -1 ){
+                perror(NULL);
+                exit(EXIT_FAILURE);
+              }
+              // after here all the stdout operations (e.g printf etc) will be redirected to the given file
+              // but stderr will still print to the terminal
+              // close the file since we no longer need it
+              if(close(fd) == -1){
+                perror(NULL);
+                exit(EXIT_FAILURE);
+              }
 
-          // handle signals only when bacground == 0
+            }else if(rsloc > 0){ // '>' and '>>' cannot coexist
+              // '>>' has been cached so instead of truncating, open the file for appending
+              int fd;
+              fd = open(args[rsloc+1],APPEND_FILE_FLAGS,CREATE_MODE);    // desired file resides at the next parameter 
+              if(fd == -1){
+                // open sets the errno so just use perror() for error printing
+                perror(NULL);
+                exit(EXIT_FAILURE);
+              }
+              // redirect the stdout to the given file descriptor
+              if(dup2(fd,STDOUT_FILENO)== -1 ){
+                perror(NULL);
+                exit(EXIT_FAILURE);
+              }
+              // after here all the stdout operations (e.g printf etc) will be redirected to the given file
+              // but stderr will still print to the terminal
+              // close the file since we no longer need it
+              if(close(fd) == -1){
+                perror(NULL);
+                exit(EXIT_FAILURE);
+              }
+            }
+            // since < and > or < and >> can co-exist i will be checing its existence with a seperated if
+            if(ltloc > 0){      // handle '<' operator
+              int fd;
+              fd = open(args[ltloc+1],READ_FILE_FLAGS,CREATE_MODE);    // desired file resides at the next parameter 
+              if(fd == -1){
+                // open sets the errno so just use perror() for error printing
+                perror(NULL);
+                exit(EXIT_FAILURE);
+              }
+              // redirect the stdout to the given file descriptor
+              if(dup2(fd,STDIN_FILENO)== -1 ){
+                perror(NULL);
+                exit(EXIT_FAILURE);
+              }
+              // after here all the stdout operations (e.g printf etc) will be redirected to the given file
+              // but stderr will still print to the terminal
+              // close the file since we no longer need it
+              if(close(fd) == -1){
+                perror(NULL);
+                exit(EXIT_FAILURE);
+              }
+            }
+          }
+          
+          // handle signals only when bacground = 0
           // handle the SIGTSTP signal in child 
           // only stop the foreground processes
           struct sigaction sigtstop_action;
@@ -202,8 +360,32 @@ int main(void)
               // exit out of the system
               exit(EXIT_FAILURE);
           }
+          // check if an redirect operator has been used
+          // if so then create a new array with size minloc
+          // allocate that array and copy the minloc-1 amount of element from args to this array
+          // use exec on newly created array 
+          // free the array afterwards
+          if(minloc>0){
+            char **newargs;
+            newargs = malloc((minloc+1)*sizeof(char*));
+            for(int i =0 ; i<minloc;i++){
+              newargs[i]= malloc((MAX_LINE/2+1)*sizeof(char));
+            }
+            // make the last element NULL for the newargs too 
+            newargs[minloc] = NULL;
 
+            // assign the args values to the new array
+            for(int i =0; i< minloc;i++){
+              strcpy(newargs[i],args[i]);
+            }
 
+            // run the commands on newargs with execv
+            for(int i =0 ; i<pathAmount; i++){
+              execv(binPath[i],newargs);
+            }
+            // if the command has not found in the PATH, or if there is some other error happened then print to stderr
+            perror("Error while executing");
+          } 
           if(background == 0){
             while(tstop_flag){
               for(int i =0 ; i<pathAmount; i++){
@@ -214,11 +396,11 @@ int main(void)
               break;
             }
           }else{
-              for(int i =0 ; i<pathAmount; i++){
-                execv(binPath[i],args);
-              }
-              // if the command has not found in the PATH, or if there is some other error happened then print to stderr
-              perror("Error while executing"); 
+            for(int i =0 ; i<pathAmount; i++){
+              execv(binPath[i],args);
+            }
+            // if the command has not found in the PATH, or if there is some other error happened then print to stderr
+            perror("Error while executing"); 
           }
           
         }
@@ -267,4 +449,5 @@ int main(void)
       }
       // free the binPath
       free(binPath);
-}
+  }
+
